@@ -14,9 +14,19 @@ What is true today:
 
 If you want the honest one-line version: **the product experience exists today; the installable plugin package does not yet.**
 
-## Screenshot
+## Screenshots
 
-![Autoresearch page](./assets/autoresearch-page-cropped.png)
+### Live lane
+
+![Autoresearch lane](./assets/autoresearch-lane.png)
+
+### Live agents
+
+![Autoresearch live agents](./assets/autoresearch-live-agents.png)
+
+### Winner and history
+
+![Autoresearch winner and history](./assets/autoresearch-history.png)
 
 ## Why It Exists
 
