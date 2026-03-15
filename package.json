@@ -4,6 +4,14 @@
   "description": "Autoresearch control surface and runtime model for Paperclip.",
   "type": "module",
   "license": "MIT",
+  "homepage": "https://github.com/errusch/paperclip-plugin-autoresearch#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/errusch/paperclip-plugin-autoresearch.git"
+  },
+  "bugs": {
+    "url": "https://github.com/errusch/paperclip-plugin-autoresearch/issues"
+  },
   "keywords": [
     "paperclip",
     "plugin",
