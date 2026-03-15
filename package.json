@@ -1,0 +1,20 @@
+{
+  "name": "paperclip-plugin-autoresearch",
+  "version": "0.1.0",
+  "description": "Autoresearch control surface and runtime model for Paperclip.",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "paperclip",
+    "plugin",
+    "autoresearch",
+    "ai",
+    "orchestration"
+  ],
+  "files": [
+    "README.md",
+    "docs",
+    "assets",
+    "LICENSE"
+  ]
+}
