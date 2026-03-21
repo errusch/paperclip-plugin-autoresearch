@@ -54,7 +54,7 @@ def validate_plan_file(plan_path: str) -> PlanValidation:
                 errors.append("plan file needs more visible structure (headings or bullets)")
             if lowered.count("\n\n") < 2:
                 errors.append("plan file needs clearer sections for goal, outputs, and stop rules")
-        except OSError as err:
+        except (OSError, UnicodeDecodeError) as err:
             errors.append(f"plan file could not be read: {err}")
 
     return PlanValidation(
