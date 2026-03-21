@@ -166,6 +166,12 @@ def normalize_contract(issue: dict) -> dict | None:
     plan_path = Path(explicit_plan_path or legacy_program_path or experiment_dir / "program.md")
     if explicit_plan_path and not plan_path.is_absolute():
         plan_path = workspace_root / plan_path
+    score_rubric_path = Path(contract.get("scoreRubricPath") or "docs/SCORING_RUBRIC.md")
+    if not score_rubric_path.is_absolute():
+        score_rubric_path = workspace_root / score_rubric_path
+    result_schema_path = Path(contract.get("resultSchemaPath") or "docs/RESULT_SCHEMA.md")
+    if not result_schema_path.is_absolute():
+        result_schema_path = workspace_root / result_schema_path
     results_path = Path(contract.get("resultsPath") or experiment_dir / "results.tsv")
     current_path = contract.get("currentPath") or contract.get("winnerPath") or contract.get("artifactPath")
     generations = [normalize_generation(item) for item in contract.get("generations", []) if isinstance(item, dict)]
@@ -197,10 +203,10 @@ def normalize_contract(issue: dict) -> dict | None:
         "planSha256": contract.get("planSha256"),
         "planValidationErrors": contract.get("planValidationErrors") or [],
         "planReanchorOnCompaction": True if contract.get("planReanchorOnCompaction") is None else bool(contract.get("planReanchorOnCompaction")),
-        "scoreRubricPath": contract.get("scoreRubricPath") or "docs/SCORING_RUBRIC.md",
+        "scoreRubricPath": str(score_rubric_path),
         "resultSchemaVersion": contract.get("resultSchemaVersion") or "v1",
         "resultSchemaRequiredFromRound": int(contract.get("resultSchemaRequiredFromRound") or default_schema_round or 1),
-        "resultSchemaPath": contract.get("resultSchemaPath") or "docs/RESULT_SCHEMA.md",
+        "resultSchemaPath": str(result_schema_path),
         "metricLabel": contract.get("metricLabel") or "score",
         "budgetCents": contract.get("budgetCents"),
         "budgetRounds": contract.get("budgetRounds"),
