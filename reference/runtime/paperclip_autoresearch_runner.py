@@ -160,7 +160,8 @@ def normalize_contract(issue: dict) -> dict | None:
     if not isinstance(contract, dict) or contract.get("kind") != "autoresearch":
         return None
     experiment_dir = Path(contract.get("experimentDir") or default_experiment_dir(issue))
-    plan_path = Path(contract.get("planPath") or contract.get("programPath") or experiment_dir / "program.md")
+    explicit_plan_path = contract.get("planPath") or contract.get("programPath")
+    plan_path = Path(explicit_plan_path or experiment_dir / "program.md")
     results_path = Path(contract.get("resultsPath") or experiment_dir / "results.tsv")
     current_path = contract.get("currentPath") or contract.get("winnerPath") or contract.get("artifactPath")
     generations = [normalize_generation(item) for item in contract.get("generations", []) if isinstance(item, dict)]
@@ -184,6 +185,7 @@ def normalize_contract(issue: dict) -> dict | None:
         "reviewMemoPath": contract.get("reviewMemoPath"),
         "planPath": str(plan_path),
         "programPath": str(plan_path),
+        "autoGeneratePlan": explicit_plan_path is None,
         "resultsPath": str(results_path),
         "experimentDir": str(experiment_dir),
         "planValidatedAt": contract.get("planValidatedAt"),
@@ -332,6 +334,8 @@ If context compaction happens, re-read this implementation plan and assess the c
 
 
 def ensure_program_file(issue: dict, contract: dict):
+    if not contract.get("autoGeneratePlan"):
+        return
     path = Path(contract["programPath"])
     if path.exists():
         return
@@ -347,7 +351,8 @@ def ensure_experiment_files(issue: dict, contract: dict) -> tuple[dict, bool]:
     ensure_results_file(Path(contract["resultsPath"]))
     validation = validate_plan_file(contract["planPath"])
     if (
-        validation.validated_at is not None
+        not validation.errors
+        and validation.validated_at is not None
         and (
             contract.get("planValidatedAt") is None
             or contract.get("planSha256") != validation.sha256
@@ -355,6 +360,9 @@ def ensure_experiment_files(issue: dict, contract: dict) -> tuple[dict, bool]:
         )
     ):
         contract["planValidatedAt"] = validation.validated_at
+        changed = True
+    if validation.errors and contract.get("planValidatedAt") is not None:
+        contract["planValidatedAt"] = None
         changed = True
     if contract.get("planSha256") != validation.sha256:
         contract["planSha256"] = validation.sha256
