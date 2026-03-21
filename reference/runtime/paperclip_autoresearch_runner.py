@@ -164,6 +164,9 @@ def normalize_contract(issue: dict) -> dict | None:
     results_path = Path(contract.get("resultsPath") or experiment_dir / "results.tsv")
     current_path = contract.get("currentPath") or contract.get("winnerPath") or contract.get("artifactPath")
     generations = [normalize_generation(item) for item in contract.get("generations", []) if isinstance(item, dict)]
+    rounds_completed = int(contract.get("roundsCompleted") or 0)
+    active_round_number = int(contract.get("activeRoundNumber") or 0) if contract.get("activeRoundNumber") else None
+    default_schema_round = (active_round_number + 1) if active_round_number is not None else (rounds_completed + 1)
     return {
         "kind": "autoresearch",
         "localStrategy": contract.get("localStrategy") if contract.get("localStrategy") in {"solo_loop", "team_round"} else "solo_loop",
@@ -189,6 +192,7 @@ def normalize_contract(issue: dict) -> dict | None:
         "planReanchorOnCompaction": True if contract.get("planReanchorOnCompaction") is None else bool(contract.get("planReanchorOnCompaction")),
         "scoreRubricPath": contract.get("scoreRubricPath") or "docs/SCORING_RUBRIC.md",
         "resultSchemaVersion": contract.get("resultSchemaVersion") or "v1",
+        "resultSchemaRequiredFromRound": int(contract.get("resultSchemaRequiredFromRound") or default_schema_round or 1),
         "resultSchemaPath": contract.get("resultSchemaPath") or "docs/RESULT_SCHEMA.md",
         "metricLabel": contract.get("metricLabel") or "score",
         "budgetCents": contract.get("budgetCents"),
@@ -203,7 +207,7 @@ def normalize_contract(issue: dict) -> dict | None:
         "scoreMethod": contract.get("scoreMethod") or "weighted_rubric",
         "keepRule": contract.get("keepRule") or "higher_score_wins",
         "status": contract.get("status") or "draft",
-        "roundsCompleted": int(contract.get("roundsCompleted") or 0),
+        "roundsCompleted": rounds_completed,
         "bestScore": contract.get("bestScore"),
         "lastScore": contract.get("lastScore"),
         "currentPath": current_path,
@@ -643,8 +647,12 @@ def finalize_active_round(
 
     round_issue = children_by_id.get(round_issue_id)
     row = results_rows.get(int(round_number))
-    result_artifact_path = result_path_for_round(contract, int(round_number))
-    result_artifact, result_artifact_error = load_result_artifact(result_artifact_path)
+    require_result_artifact = int(round_number) >= int(contract.get("resultSchemaRequiredFromRound") or 1)
+    result_artifact = None
+    result_artifact_error = None
+    if require_result_artifact:
+        result_artifact_path = result_path_for_round(contract, int(round_number))
+        result_artifact, result_artifact_error = load_result_artifact(result_artifact_path)
     live_runs = live_runs_by_issue.get(round_issue_id, [])
     if round_issue and not terminal_status(round_issue) and (row is None or result_artifact_error is not None):
         contract["generations"] = update_generation(
@@ -1086,7 +1094,7 @@ def process_parent_issue(parent_issue: dict, all_issues: list[dict], live_runs: 
         summary["note"] = contract.get("stopReason")
         return summary
 
-    if contract.get("planValidationErrors"):
+    if contract.get("status") in {"draft", "running", "paused"} and contract.get("planValidationErrors"):
         validation = validate_plan_file(contract["planPath"])
         reason = f"Plan validation failed: {plan_validation_summary(validation)}"
         contract, paused = pause_local_contract(

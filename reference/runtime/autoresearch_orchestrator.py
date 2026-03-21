@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -43,12 +44,16 @@ def validate_plan_file(plan_path: str) -> PlanValidation:
             if len(content.strip()) < 80:
                 errors.append("plan file is too short to anchor a long run")
             lowered = content.lower()
-            has_goal_anchor = any(token in lowered for token in ("goal", "objective", "setup", "experimentation"))
-            has_output_anchor = any(token in lowered for token in ("deliverable", "output", "results format", "candidate", "memo"))
-            if not has_goal_anchor:
-                errors.append("plan file is missing a clear goal/objective section")
-            if not has_output_anchor:
-                errors.append("plan file is missing expected outputs/deliverables")
+            heading_count = sum(1 for line in content.splitlines() if line.lstrip().startswith("#"))
+            bullet_count = sum(
+                1
+                for line in content.splitlines()
+                if line.lstrip().startswith(("- ", "* ")) or re.match(r"^\d+[.)]\s", line.lstrip())
+            )
+            if heading_count == 0 and bullet_count < 3:
+                errors.append("plan file needs more visible structure (headings or bullets)")
+            if lowered.count("\n\n") < 2:
+                errors.append("plan file needs clearer sections for goal, outputs, and stop rules")
         except OSError as err:
             errors.append(f"plan file could not be read: {err}")
 
