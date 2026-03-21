@@ -30,3 +30,10 @@ Compared against:
 - Paperclip plugin runtime support
 - screenshots kept current
 - install story updated once the runtime lands
+
+## What Improved In This Candidate Pass
+
+- plan-first contract added to the reference runner
+- compaction-aware round prompts added
+- explicit prerequisite and recovery docs added
+- visible rubric and trust surfaces added to the candidate surface

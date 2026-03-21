@@ -11,6 +11,14 @@ import urllib.request
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from autoresearch_orchestrator import (
+    captain_prompt,
+    contributor_prompt,
+    plan_validation_summary,
+    solo_round_prompt,
+    validate_plan_file,
+)
+
 API_BASE = "http://127.0.0.1:3100/api"
 COMPANY_ID = "478acbc9-2644-4c47-bbf4-c384afc0f76a"
 LOCAL_TZ = ZoneInfo("America/Chicago")
@@ -152,7 +160,7 @@ def normalize_contract(issue: dict) -> dict | None:
     if not isinstance(contract, dict) or contract.get("kind") != "autoresearch":
         return None
     experiment_dir = Path(contract.get("experimentDir") or default_experiment_dir(issue))
-    program_path = Path(contract.get("programPath") or experiment_dir / "program.md")
+    plan_path = Path(contract.get("planPath") or contract.get("programPath") or experiment_dir / "program.md")
     results_path = Path(contract.get("resultsPath") or experiment_dir / "results.tsv")
     current_path = contract.get("currentPath") or contract.get("winnerPath") or contract.get("artifactPath")
     generations = [normalize_generation(item) for item in contract.get("generations", []) if isinstance(item, dict)]
@@ -171,9 +179,17 @@ def normalize_contract(issue: dict) -> dict | None:
         "baselinePath": contract.get("baselinePath"),
         "winnerPath": contract.get("winnerPath"),
         "reviewMemoPath": contract.get("reviewMemoPath"),
-        "programPath": str(program_path),
+        "planPath": str(plan_path),
+        "programPath": str(plan_path),
         "resultsPath": str(results_path),
         "experimentDir": str(experiment_dir),
+        "planValidatedAt": contract.get("planValidatedAt"),
+        "planSha256": contract.get("planSha256"),
+        "planValidationErrors": contract.get("planValidationErrors") or [],
+        "planReanchorOnCompaction": True if contract.get("planReanchorOnCompaction") is None else bool(contract.get("planReanchorOnCompaction")),
+        "scoreRubricPath": contract.get("scoreRubricPath") or "docs/SCORING_RUBRIC.md",
+        "resultSchemaVersion": contract.get("resultSchemaVersion") or "v1",
+        "resultSchemaPath": contract.get("resultSchemaPath") or "docs/RESULT_SCHEMA.md",
         "metricLabel": contract.get("metricLabel") or "score",
         "budgetCents": contract.get("budgetCents"),
         "budgetRounds": contract.get("budgetRounds"),
@@ -233,8 +249,10 @@ This is a Paperclip team-round implementation of the karpathy/autoresearch loop.
 Parent issue: {issue.get("identifier") or issue["id"]} — {issue.get("title")}
 Mutable artifact label: {contract["artifactLabel"]}
 Current champion: {current_path}
-Program file: {contract["programPath"]}
+Implementation plan: {contract["planPath"]}
 Results log: {contract["resultsPath"]}
+Scoring rubric: {contract.get("scoreRubricPath") or "docs/SCORING_RUBRIC.md"}
+Result schema: {contract.get("resultSchemaPath") or "docs/RESULT_SCHEMA.md"}
 
 ## Team-round semantics
 
@@ -251,6 +269,7 @@ Each generation is one shared round with a hard wall-clock deadline.
 - Keep contributor notes short and decision-useful
 - Prefer one clean improvement over five conflicting drafts
 - The captain uses whatever notes arrive before the wall-clock deadline
+- If context compaction happens, re-read this plan before continuing
 """
     return f"""# autoresearch
 
@@ -261,8 +280,10 @@ This is a Paperclip implementation of the karpathy/autoresearch loop.
 Parent issue: {issue.get("identifier") or issue["id"]} — {issue.get("title")}
 Mutable artifact label: {contract["artifactLabel"]}
 Current champion: {current_path}
-Program file: {contract["programPath"]}
+Implementation plan: {contract["planPath"]}
 Results log: {contract["resultsPath"]}
+Scoring rubric: {contract.get("scoreRubricPath") or "docs/SCORING_RUBRIC.md"}
+Result schema: {contract.get("resultSchemaPath") or "docs/RESULT_SCHEMA.md"}
 
 ## Experimentation
 
@@ -299,6 +320,10 @@ round\tscore\tstatus\tdescription\tcandidate_path\tmemo_path\tstarted_at\tfinish
 
 The runner will schedule new child round issues every few minutes while the parent loop is active.
 You do not need to continue forever inside a single run; just complete one generation cleanly.
+
+## Compaction rule
+
+If context compaction happens, re-read this implementation plan and assess the current state before continuing.
 """
 
 
@@ -316,6 +341,19 @@ def ensure_experiment_files(issue: dict, contract: dict) -> tuple[dict, bool]:
     experiment_dir.mkdir(parents=True, exist_ok=True)
     ensure_program_file(issue, contract)
     ensure_results_file(Path(contract["resultsPath"]))
+    validation = validate_plan_file(contract["planPath"])
+    if contract.get("planValidatedAt") != validation.validated_at:
+        contract["planValidatedAt"] = validation.validated_at
+        changed = True
+    if contract.get("planSha256") != validation.sha256:
+        contract["planSha256"] = validation.sha256
+        changed = True
+    if contract.get("planValidationErrors") != validation.errors:
+        contract["planValidationErrors"] = validation.errors
+        changed = True
+    if contract.get("planValidatedAt") is None and validation.validated_at is not None:
+        contract["planValidatedAt"] = validation.validated_at
+        changed = True
 
     if contract.get("currentPath") is None:
         current_path = contract.get("winnerPath") or contract.get("artifactPath") or contract.get("baselinePath")
@@ -384,6 +422,10 @@ def candidate_path_for_round(contract: dict, round_number: int) -> Path:
 
 def memo_path_for_round(contract: dict, round_number: int) -> Path:
     return Path(contract["experimentDir"]) / f"round-{round_number:03d}-memo.md"
+
+
+def result_path_for_round(contract: dict, round_number: int) -> Path:
+    return Path(contract["experimentDir"]) / f"round-{round_number:03d}-result.json"
 
 
 def agent_label(agent_id: str | None) -> str:
@@ -797,6 +839,7 @@ def spawn_round(parent_issue: dict, contract: dict) -> tuple[dict, dict, list[di
     round_number = int(contract.get("roundsCompleted") or 0) + 1
     candidate_path = candidate_path_for_round(contract, round_number)
     memo_path = memo_path_for_round(contract, round_number)
+    result_path = result_path_for_round(contract, round_number)
     current_champion = contract.get("currentPath") or contract.get("winnerPath") or contract.get("artifactPath") or contract.get("baselinePath")
     contributor_issues: list[dict] = []
     started_at_dt = now_utc()
@@ -829,12 +872,12 @@ def spawn_round(parent_issue: dict, contract: dict) -> tuple[dict, dict, list[di
                         "projectId": parent_issue.get("projectId"),
                         "parentId": parent_issue["id"],
                         "title": f"Round {round_number} / {contributor_name}: unavailable this round",
-                        "description": (
-                            "Provider cooldown: rate-limited.\n\n"
-                            f"{contributor_name}'s primary and fallback models are both rate-limited right now, "
-                            "so this contributor slot is unavailable for this round.\n"
-                            f"If the lane recovers later, the next round can include `{note_path}` again.\n"
-                            "Do not wake this contributor for the current round."
+                    "description": (
+                        "Provider cooldown: rate-limited.\n\n"
+                        f"{contributor_name}'s primary and fallback models are both rate-limited right now, "
+                        "so this contributor slot is unavailable for this round.\n"
+                        f"If the lane recovers later, the next round can include `{note_path}` again.\n"
+                        "Do not wake this contributor for the current round."
                         ),
                         "status": "blocked",
                         "priority": parent_issue.get("priority") or "high",
@@ -851,13 +894,13 @@ def spawn_round(parent_issue: dict, contract: dict) -> tuple[dict, dict, list[di
                     "projectId": parent_issue.get("projectId"),
                     "parentId": parent_issue["id"],
                     "title": f"Round {round_number} / {contributor_name}: contribute to {parent_issue['title']}",
-                    "description": (
-                        f"This is one contribution to a shared Autoresearch team round for parent {parent_issue.get('identifier') or parent_issue['id']}.\n\n"
-                        f"Read `{contract['programPath']}` and the current champion at `{current_champion}`.\n"
-                        f"{contributor_role_text(contributor_agent_id)}\n"
-                        f"Write exactly one short note to `{note_path}` before the round deadline at {deadline_at}.\n"
-                        f"Do not create alternate artifacts or extra tasks.\n"
-                        f"When done, mark this issue done."
+                    "description": contributor_prompt(
+                        parent_identifier=parent_issue.get("identifier") or parent_issue["id"],
+                        plan_path=contract["planPath"],
+                        current_champion=current_champion,
+                        note_path=str(note_path),
+                        deadline_at=deadline_at,
+                        role_instruction=contributor_role_text(contributor_agent_id),
                     ),
                     "status": "todo",
                     "priority": parent_issue.get("priority") or "high",
@@ -869,30 +912,34 @@ def spawn_round(parent_issue: dict, contract: dict) -> tuple[dict, dict, list[di
             contributor_issue_identifiers.append(contributor_issue.get("identifier"))
             contributor_lines.append(f"- {contributor_name}: `{note_path}` ({contributor_issue.get('identifier')})")
 
-        description = (
-            f"This is the captain issue for one shared Autoresearch team round for parent {parent_issue.get('identifier') or parent_issue['id']}.\n\n"
-            f"Read the loop instructions in `{contract['programPath']}` and the current champion at `{current_champion}`.\n"
-            f"The round has a hard wall-clock deadline at {deadline_at} ({deadline_minutes} minutes).\n"
-            f"Contributor notes may arrive here:\n" + ("\n".join(contributor_lines) if contributor_lines else "- no contributor notes configured") + "\n\n"
-            f"As round captain, assemble exactly one candidate at `{candidate_path}` and one memo at `{memo_path}`.\n"
-            f"Append exactly one TSV row to `{contract['resultsPath']}` using the required columns.\n"
-            f"Use whatever contributor notes exist by the deadline; do not wait indefinitely.\n"
-            f"If the candidate should replace the current champion, log `keep`; otherwise log `discard`. Use `failed` if you could not produce a viable result.\n"
-            f"When you are done, mark this issue done."
+        description = captain_prompt(
+            parent_identifier=parent_issue.get("identifier") or parent_issue["id"],
+            plan_path=contract["planPath"],
+            plan_sha256=contract.get("planSha256"),
+            current_champion=current_champion,
+            candidate_path=str(candidate_path),
+            memo_path=str(memo_path),
+            result_path=str(result_path),
+            result_schema_path=contract.get("resultSchemaPath") or "docs/RESULT_SCHEMA.md",
+            results_tsv_path=contract["resultsPath"],
+            deadline_at=deadline_at,
+            deadline_minutes=deadline_minutes,
+            contributor_lines=contributor_lines,
         )
     else:
         captain_agent_id = parent_issue.get("assigneeAgentId")
         contributor_issue_ids = []
         contributor_issue_identifiers = []
-        description = (
-            f"Run one autoresearch generation for parent {parent_issue.get('identifier') or parent_issue['id']}.\n\n"
-            f"Read the loop instructions in `{contract['programPath']}`.\n"
-            f"Read the current champion at `{current_champion}`.\n"
-            f"Write exactly one candidate to `{candidate_path}`.\n"
-            f"Write a short round memo to `{memo_path}`.\n"
-            f"Append exactly one TSV row to `{contract['resultsPath']}` using the required columns.\n"
-            f"If the candidate should replace the current champion, log `keep`; otherwise log `discard`. Use `failed` if you could not produce a viable result.\n"
-            f"When you are done, mark this round issue done."
+        description = solo_round_prompt(
+            parent_identifier=parent_issue.get("identifier") or parent_issue["id"],
+            plan_path=contract["planPath"],
+            plan_sha256=contract.get("planSha256"),
+            current_champion=current_champion,
+            candidate_path=str(candidate_path),
+            memo_path=str(memo_path),
+            result_path=str(result_path),
+            result_schema_path=contract.get("resultSchemaPath") or "docs/RESULT_SCHEMA.md",
+            results_tsv_path=contract["resultsPath"],
         )
     child_issue = create_issue(
         {
@@ -992,6 +1039,21 @@ def process_parent_issue(parent_issue: dict, all_issues: list[dict], live_runs: 
             patch_parent_issue(parent_issue, contract)
         summary["status"] = contract["status"]
         summary["note"] = contract.get("stopReason")
+        return summary
+
+    if contract.get("planValidationErrors"):
+        validation = validate_plan_file(contract["planPath"])
+        reason = f"Plan validation failed: {plan_validation_summary(validation)}"
+        contract, paused = pause_local_contract(
+            contract,
+            children_by_id,
+            live_runs_by_issue,
+            reason,
+        )
+        if paused or changed:
+            patch_parent_issue(parent_issue, contract)
+        summary["status"] = contract["status"]
+        summary["note"] = reason
         return summary
 
     contract, deadline_adjusted = maybe_trigger_team_round_deadline(parent_issue, contract, children_by_id, live_runs_by_issue)
