@@ -43,9 +43,11 @@ def validate_plan_file(plan_path: str) -> PlanValidation:
             if len(content.strip()) < 80:
                 errors.append("plan file is too short to anchor a long run")
             lowered = content.lower()
-            if "goal" not in lowered and "objective" not in lowered:
+            has_goal_anchor = any(token in lowered for token in ("goal", "objective", "setup", "experimentation"))
+            has_output_anchor = any(token in lowered for token in ("deliverable", "output", "results format", "candidate", "memo"))
+            if not has_goal_anchor:
                 errors.append("plan file is missing a clear goal/objective section")
-            if "deliverable" not in lowered and "output" not in lowered:
+            if not has_output_anchor:
                 errors.append("plan file is missing expected outputs/deliverables")
         except OSError as err:
             errors.append(f"plan file could not be read: {err}")
@@ -129,8 +131,7 @@ def captain_prompt(
         "The result JSON must include:\n"
         "- summary\n"
         "- output paths\n"
-        "- verification notes\n"
-        "- blockers\n"
+        "- verification notes with blockers\n"
         "- next actions\n\n"
         "If the candidate should replace the current champion, log `keep`; otherwise log `discard`. Use `failed` if you could not produce a viable result.\n"
         "When you are done, mark this issue done."
@@ -163,7 +164,7 @@ def solo_round_prompt(
         f"- exactly one memo at `{memo_path}`\n"
         f"- exactly one structured result JSON at `{result_path}` matching `{result_schema_path}`\n"
         f"- exactly one TSV row appended to `{results_tsv_path}`\n\n"
-        "The result JSON must include summary, outputs, verification, blockers, and next actions.\n"
+        "The result JSON must include summary, outputs, verification with blockers, and next actions.\n"
         "If the candidate should replace the current champion, log `keep`; otherwise log `discard`. Use `failed` if you could not produce a viable result.\n"
         "When you are done, mark this round issue done."
     )

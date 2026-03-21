@@ -342,7 +342,14 @@ def ensure_experiment_files(issue: dict, contract: dict) -> tuple[dict, bool]:
     ensure_program_file(issue, contract)
     ensure_results_file(Path(contract["resultsPath"]))
     validation = validate_plan_file(contract["planPath"])
-    if contract.get("planValidatedAt") != validation.validated_at:
+    if (
+        validation.validated_at is not None
+        and (
+            contract.get("planValidatedAt") is None
+            or contract.get("planSha256") != validation.sha256
+            or contract.get("planValidationErrors") != validation.errors
+        )
+    ):
         contract["planValidatedAt"] = validation.validated_at
         changed = True
     if contract.get("planSha256") != validation.sha256:
@@ -350,9 +357,6 @@ def ensure_experiment_files(issue: dict, contract: dict) -> tuple[dict, bool]:
         changed = True
     if contract.get("planValidationErrors") != validation.errors:
         contract["planValidationErrors"] = validation.errors
-        changed = True
-    if contract.get("planValidatedAt") is None and validation.validated_at is not None:
-        contract["planValidatedAt"] = validation.validated_at
         changed = True
 
     if contract.get("currentPath") is None:
@@ -426,6 +430,42 @@ def memo_path_for_round(contract: dict, round_number: int) -> Path:
 
 def result_path_for_round(contract: dict, round_number: int) -> Path:
     return Path(contract["experimentDir"]) / f"round-{round_number:03d}-result.json"
+
+
+def load_result_artifact(path: Path) -> tuple[dict | None, str | None]:
+    if not path.exists():
+        return None, "Missing structured result JSON."
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as err:
+        return None, f"Invalid structured result JSON: {err}"
+    if not isinstance(payload, dict):
+        return None, "Structured result JSON must be an object."
+
+    outputs = payload.get("outputs")
+    verification = payload.get("verification")
+    next_actions = payload.get("nextActions")
+    blockers = verification.get("blockers") if isinstance(verification, dict) else None
+
+    if not isinstance(payload.get("summary"), str) or not payload["summary"].strip():
+        return None, "Structured result JSON is missing a non-empty summary."
+    if not isinstance(outputs, dict):
+        return None, "Structured result JSON is missing outputs."
+    if not isinstance(outputs.get("candidatePath"), str) or not outputs["candidatePath"].strip():
+        return None, "Structured result JSON is missing outputs.candidatePath."
+    if not isinstance(outputs.get("memoPath"), str) or not outputs["memoPath"].strip():
+        return None, "Structured result JSON is missing outputs.memoPath."
+    if not isinstance(verification, dict):
+        return None, "Structured result JSON is missing verification."
+    for key in ("testedLocally", "needsStaging", "needsHumanReview"):
+        if not isinstance(verification.get(key), bool):
+            return None, f"Structured result JSON is missing verification.{key}."
+    if not isinstance(blockers, list):
+        return None, "Structured result JSON is missing verification.blockers."
+    if not isinstance(next_actions, list) or not next_actions:
+        return None, "Structured result JSON is missing nextActions."
+
+    return payload, None
 
 
 def agent_label(agent_id: str | None) -> str:
@@ -603,8 +643,10 @@ def finalize_active_round(
 
     round_issue = children_by_id.get(round_issue_id)
     row = results_rows.get(int(round_number))
+    result_artifact_path = result_path_for_round(contract, int(round_number))
+    result_artifact, result_artifact_error = load_result_artifact(result_artifact_path)
     live_runs = live_runs_by_issue.get(round_issue_id, [])
-    if round_issue and not terminal_status(round_issue) and row is None:
+    if round_issue and not terminal_status(round_issue) and (row is None or result_artifact_error is not None):
         contract["generations"] = update_generation(
             contract["generations"],
             round_number,
@@ -627,7 +669,8 @@ def finalize_active_round(
     for contributor_issue_id in contract.get("activeRoundContributorIssueIds") or []:
         cancel_issue_and_runs(children_by_id.get(contributor_issue_id), live_runs_by_issue)
     cancel_issue_and_runs(round_issue, live_runs_by_issue, status="done")
-    if row is None:
+    if row is None or result_artifact_error is not None:
+      failure_summary = result_artifact_error or "Round completed without a results.tsv row."
       contract["generations"] = update_generation(
           contract["generations"],
           int(round_number),
@@ -639,7 +682,7 @@ def finalize_active_round(
               "memoPath": str(memo_path_for_round(contract, int(round_number))),
               "score": None,
               "deltaScore": None,
-                "summary": "Round completed without a results.tsv row.",
+                "summary": failure_summary,
                 "mvpLabel": None,
                 "missingContributorLabels": [],
                 "startedAt": contract.get("lastRoundStartedAt"),
@@ -728,6 +771,8 @@ def finalize_active_round(
     contract["lastScore"] = score
     contract["lastRoundFinishedAt"] = finished_at
     contract["reviewMemoPath"] = row.get("memo_path") or contract.get("reviewMemoPath")
+    if result_artifact is not None:
+        contract["reviewMemoPath"] = result_artifact.get("outputs", {}).get("memoPath") or contract.get("reviewMemoPath")
     contract["activeRoundIssueId"] = None
     contract["activeRoundIssueIdentifier"] = None
     contract["activeRoundNumber"] = None
