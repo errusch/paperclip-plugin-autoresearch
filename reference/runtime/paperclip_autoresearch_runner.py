@@ -11,6 +11,14 @@ import urllib.request
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from autoresearch_orchestrator import (
+    captain_prompt,
+    contributor_prompt,
+    plan_validation_summary,
+    solo_round_prompt,
+    validate_plan_file,
+)
+
 API_BASE = "http://127.0.0.1:3100/api"
 COMPANY_ID = "478acbc9-2644-4c47-bbf4-c384afc0f76a"
 LOCAL_TZ = ZoneInfo("America/Chicago")
@@ -152,10 +160,24 @@ def normalize_contract(issue: dict) -> dict | None:
     if not isinstance(contract, dict) or contract.get("kind") != "autoresearch":
         return None
     experiment_dir = Path(contract.get("experimentDir") or default_experiment_dir(issue))
-    program_path = Path(contract.get("programPath") or experiment_dir / "program.md")
+    workspace_root = Path(contract.get("workspaceRoot") or contract.get("repoRoot") or Path.cwd())
+    explicit_plan_path = contract.get("planPath")
+    legacy_program_path = contract.get("programPath")
+    plan_path = Path(explicit_plan_path or legacy_program_path or experiment_dir / "program.md")
+    if explicit_plan_path and not plan_path.is_absolute():
+        plan_path = workspace_root / plan_path
+    score_rubric_path = Path(contract.get("scoreRubricPath") or "docs/SCORING_RUBRIC.md")
+    if not score_rubric_path.is_absolute():
+        score_rubric_path = workspace_root / score_rubric_path
+    result_schema_path = Path(contract.get("resultSchemaPath") or "docs/RESULT_SCHEMA.md")
+    if not result_schema_path.is_absolute():
+        result_schema_path = workspace_root / result_schema_path
     results_path = Path(contract.get("resultsPath") or experiment_dir / "results.tsv")
     current_path = contract.get("currentPath") or contract.get("winnerPath") or contract.get("artifactPath")
     generations = [normalize_generation(item) for item in contract.get("generations", []) if isinstance(item, dict)]
+    rounds_completed = int(contract.get("roundsCompleted") or 0)
+    active_round_number = int(contract.get("activeRoundNumber") or 0) if contract.get("activeRoundNumber") else None
+    default_schema_round = (active_round_number + 1) if active_round_number is not None else (rounds_completed + 1)
     return {
         "kind": "autoresearch",
         "localStrategy": contract.get("localStrategy") if contract.get("localStrategy") in {"solo_loop", "team_round"} else "solo_loop",
@@ -171,9 +193,20 @@ def normalize_contract(issue: dict) -> dict | None:
         "baselinePath": contract.get("baselinePath"),
         "winnerPath": contract.get("winnerPath"),
         "reviewMemoPath": contract.get("reviewMemoPath"),
-        "programPath": str(program_path),
+        "planPath": str(plan_path),
+        "programPath": str(plan_path),
+        "autoGeneratePlan": explicit_plan_path is None,
+        "workspaceRoot": str(workspace_root),
         "resultsPath": str(results_path),
         "experimentDir": str(experiment_dir),
+        "planValidatedAt": contract.get("planValidatedAt"),
+        "planSha256": contract.get("planSha256"),
+        "planValidationErrors": contract.get("planValidationErrors") or [],
+        "planReanchorOnCompaction": True if contract.get("planReanchorOnCompaction") is None else bool(contract.get("planReanchorOnCompaction")),
+        "scoreRubricPath": str(score_rubric_path),
+        "resultSchemaVersion": contract.get("resultSchemaVersion") or "v1",
+        "resultSchemaRequiredFromRound": int(contract.get("resultSchemaRequiredFromRound") or default_schema_round or 1),
+        "resultSchemaPath": str(result_schema_path),
         "metricLabel": contract.get("metricLabel") or "score",
         "budgetCents": contract.get("budgetCents"),
         "budgetRounds": contract.get("budgetRounds"),
@@ -187,7 +220,7 @@ def normalize_contract(issue: dict) -> dict | None:
         "scoreMethod": contract.get("scoreMethod") or "weighted_rubric",
         "keepRule": contract.get("keepRule") or "higher_score_wins",
         "status": contract.get("status") or "draft",
-        "roundsCompleted": int(contract.get("roundsCompleted") or 0),
+        "roundsCompleted": rounds_completed,
         "bestScore": contract.get("bestScore"),
         "lastScore": contract.get("lastScore"),
         "currentPath": current_path,
@@ -233,8 +266,10 @@ This is a Paperclip team-round implementation of the karpathy/autoresearch loop.
 Parent issue: {issue.get("identifier") or issue["id"]} — {issue.get("title")}
 Mutable artifact label: {contract["artifactLabel"]}
 Current champion: {current_path}
-Program file: {contract["programPath"]}
+Implementation plan: {contract["planPath"]}
 Results log: {contract["resultsPath"]}
+Scoring rubric: {contract.get("scoreRubricPath") or "docs/SCORING_RUBRIC.md"}
+Result schema: {contract.get("resultSchemaPath") or "docs/RESULT_SCHEMA.md"}
 
 ## Team-round semantics
 
@@ -251,6 +286,7 @@ Each generation is one shared round with a hard wall-clock deadline.
 - Keep contributor notes short and decision-useful
 - Prefer one clean improvement over five conflicting drafts
 - The captain uses whatever notes arrive before the wall-clock deadline
+- If context compaction happens, re-read this plan before continuing
 """
     return f"""# autoresearch
 
@@ -261,8 +297,10 @@ This is a Paperclip implementation of the karpathy/autoresearch loop.
 Parent issue: {issue.get("identifier") or issue["id"]} — {issue.get("title")}
 Mutable artifact label: {contract["artifactLabel"]}
 Current champion: {current_path}
-Program file: {contract["programPath"]}
+Implementation plan: {contract["planPath"]}
 Results log: {contract["resultsPath"]}
+Scoring rubric: {contract.get("scoreRubricPath") or "docs/SCORING_RUBRIC.md"}
+Result schema: {contract.get("resultSchemaPath") or "docs/RESULT_SCHEMA.md"}
 
 ## Experimentation
 
@@ -299,10 +337,16 @@ round\tscore\tstatus\tdescription\tcandidate_path\tmemo_path\tstarted_at\tfinish
 
 The runner will schedule new child round issues every few minutes while the parent loop is active.
 You do not need to continue forever inside a single run; just complete one generation cleanly.
+
+## Compaction rule
+
+If context compaction happens, re-read this implementation plan and assess the current state before continuing.
 """
 
 
 def ensure_program_file(issue: dict, contract: dict):
+    if not contract.get("autoGeneratePlan"):
+        return
     path = Path(contract["programPath"])
     if path.exists():
         return
@@ -316,6 +360,27 @@ def ensure_experiment_files(issue: dict, contract: dict) -> tuple[dict, bool]:
     experiment_dir.mkdir(parents=True, exist_ok=True)
     ensure_program_file(issue, contract)
     ensure_results_file(Path(contract["resultsPath"]))
+    validation = validate_plan_file(contract["planPath"])
+    if (
+        not validation.errors
+        and validation.validated_at is not None
+        and (
+            contract.get("planValidatedAt") is None
+            or contract.get("planSha256") != validation.sha256
+            or contract.get("planValidationErrors") != validation.errors
+        )
+    ):
+        contract["planValidatedAt"] = validation.validated_at
+        changed = True
+    if validation.errors and contract.get("planValidatedAt") is not None:
+        contract["planValidatedAt"] = None
+        changed = True
+    if contract.get("planSha256") != validation.sha256:
+        contract["planSha256"] = validation.sha256
+        changed = True
+    if contract.get("planValidationErrors") != validation.errors:
+        contract["planValidationErrors"] = validation.errors
+        changed = True
 
     if contract.get("currentPath") is None:
         current_path = contract.get("winnerPath") or contract.get("artifactPath") or contract.get("baselinePath")
@@ -328,13 +393,13 @@ def ensure_experiment_files(issue: dict, contract: dict) -> tuple[dict, bool]:
     if contract.get("localStrategy") == "team_round" and not contract.get("roundCaptainAgentId"):
         contract["roundCaptainAgentId"] = issue.get("assigneeAgentId")
         changed = True
-    if contract.get("status") == "draft":
+    if not validation.errors and contract.get("status") == "draft":
         contract["status"] = "running"
         changed = True
-    if not contract.get("loopStartedAt"):
+    if not validation.errors and not contract.get("loopStartedAt"):
         contract["loopStartedAt"] = isoformat(now_utc())
         changed = True
-    if contract.get("status") == "running" and not contract.get("lastRestartedAt"):
+    if not validation.errors and contract.get("status") == "running" and not contract.get("lastRestartedAt"):
         contract["lastRestartedAt"] = contract["loopStartedAt"]
         contract["lastRestartReason"] = "initial start"
         changed = True
@@ -384,6 +449,46 @@ def candidate_path_for_round(contract: dict, round_number: int) -> Path:
 
 def memo_path_for_round(contract: dict, round_number: int) -> Path:
     return Path(contract["experimentDir"]) / f"round-{round_number:03d}-memo.md"
+
+
+def result_path_for_round(contract: dict, round_number: int) -> Path:
+    return Path(contract["experimentDir"]) / f"round-{round_number:03d}-result.json"
+
+
+def load_result_artifact(path: Path) -> tuple[dict | None, str | None]:
+    if not path.exists():
+        return None, "Missing structured result JSON."
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as err:
+        return None, f"Invalid structured result JSON: {err}"
+    if not isinstance(payload, dict):
+        return None, "Structured result JSON must be an object."
+
+    outputs = payload.get("outputs")
+    verification = payload.get("verification")
+    next_actions = payload.get("nextActions")
+    blockers = verification.get("blockers") if isinstance(verification, dict) else None
+
+    if not isinstance(payload.get("summary"), str) or not payload["summary"].strip():
+        return None, "Structured result JSON is missing a non-empty summary."
+    if not isinstance(outputs, dict):
+        return None, "Structured result JSON is missing outputs."
+    if not isinstance(outputs.get("candidatePath"), str) or not outputs["candidatePath"].strip():
+        return None, "Structured result JSON is missing outputs.candidatePath."
+    if not isinstance(outputs.get("memoPath"), str) or not outputs["memoPath"].strip():
+        return None, "Structured result JSON is missing outputs.memoPath."
+    if not isinstance(verification, dict):
+        return None, "Structured result JSON is missing verification."
+    for key in ("testedLocally", "needsStaging", "needsHumanReview"):
+        if not isinstance(verification.get(key), bool):
+            return None, f"Structured result JSON is missing verification.{key}."
+    if not isinstance(blockers, list):
+        return None, "Structured result JSON is missing verification.blockers."
+    if not isinstance(next_actions, list) or not next_actions:
+        return None, "Structured result JSON is missing nextActions."
+
+    return payload, None
 
 
 def agent_label(agent_id: str | None) -> str:
@@ -561,8 +666,14 @@ def finalize_active_round(
 
     round_issue = children_by_id.get(round_issue_id)
     row = results_rows.get(int(round_number))
+    require_result_artifact = int(round_number) >= int(contract.get("resultSchemaRequiredFromRound") or 1)
+    result_artifact = None
+    result_artifact_error = None
+    if require_result_artifact:
+        result_artifact_path = result_path_for_round(contract, int(round_number))
+        result_artifact, result_artifact_error = load_result_artifact(result_artifact_path)
     live_runs = live_runs_by_issue.get(round_issue_id, [])
-    if round_issue and not terminal_status(round_issue) and row is None:
+    if round_issue and not terminal_status(round_issue) and (row is None or result_artifact_error is not None):
         contract["generations"] = update_generation(
             contract["generations"],
             round_number,
@@ -585,7 +696,8 @@ def finalize_active_round(
     for contributor_issue_id in contract.get("activeRoundContributorIssueIds") or []:
         cancel_issue_and_runs(children_by_id.get(contributor_issue_id), live_runs_by_issue)
     cancel_issue_and_runs(round_issue, live_runs_by_issue, status="done")
-    if row is None:
+    if row is None or result_artifact_error is not None:
+      failure_summary = result_artifact_error or "Round completed without a results.tsv row."
       contract["generations"] = update_generation(
           contract["generations"],
           int(round_number),
@@ -597,7 +709,7 @@ def finalize_active_round(
               "memoPath": str(memo_path_for_round(contract, int(round_number))),
               "score": None,
               "deltaScore": None,
-                "summary": "Round completed without a results.tsv row.",
+                "summary": failure_summary,
                 "mvpLabel": None,
                 "missingContributorLabels": [],
                 "startedAt": contract.get("lastRoundStartedAt"),
@@ -686,6 +798,8 @@ def finalize_active_round(
     contract["lastScore"] = score
     contract["lastRoundFinishedAt"] = finished_at
     contract["reviewMemoPath"] = row.get("memo_path") or contract.get("reviewMemoPath")
+    if result_artifact is not None:
+        contract["reviewMemoPath"] = result_artifact.get("outputs", {}).get("memoPath") or contract.get("reviewMemoPath")
     contract["activeRoundIssueId"] = None
     contract["activeRoundIssueIdentifier"] = None
     contract["activeRoundNumber"] = None
@@ -797,6 +911,7 @@ def spawn_round(parent_issue: dict, contract: dict) -> tuple[dict, dict, list[di
     round_number = int(contract.get("roundsCompleted") or 0) + 1
     candidate_path = candidate_path_for_round(contract, round_number)
     memo_path = memo_path_for_round(contract, round_number)
+    result_path = result_path_for_round(contract, round_number)
     current_champion = contract.get("currentPath") or contract.get("winnerPath") or contract.get("artifactPath") or contract.get("baselinePath")
     contributor_issues: list[dict] = []
     started_at_dt = now_utc()
@@ -829,12 +944,12 @@ def spawn_round(parent_issue: dict, contract: dict) -> tuple[dict, dict, list[di
                         "projectId": parent_issue.get("projectId"),
                         "parentId": parent_issue["id"],
                         "title": f"Round {round_number} / {contributor_name}: unavailable this round",
-                        "description": (
-                            "Provider cooldown: rate-limited.\n\n"
-                            f"{contributor_name}'s primary and fallback models are both rate-limited right now, "
-                            "so this contributor slot is unavailable for this round.\n"
-                            f"If the lane recovers later, the next round can include `{note_path}` again.\n"
-                            "Do not wake this contributor for the current round."
+                    "description": (
+                        "Provider cooldown: rate-limited.\n\n"
+                        f"{contributor_name}'s primary and fallback models are both rate-limited right now, "
+                        "so this contributor slot is unavailable for this round.\n"
+                        f"If the lane recovers later, the next round can include `{note_path}` again.\n"
+                        "Do not wake this contributor for the current round."
                         ),
                         "status": "blocked",
                         "priority": parent_issue.get("priority") or "high",
@@ -851,13 +966,13 @@ def spawn_round(parent_issue: dict, contract: dict) -> tuple[dict, dict, list[di
                     "projectId": parent_issue.get("projectId"),
                     "parentId": parent_issue["id"],
                     "title": f"Round {round_number} / {contributor_name}: contribute to {parent_issue['title']}",
-                    "description": (
-                        f"This is one contribution to a shared Autoresearch team round for parent {parent_issue.get('identifier') or parent_issue['id']}.\n\n"
-                        f"Read `{contract['programPath']}` and the current champion at `{current_champion}`.\n"
-                        f"{contributor_role_text(contributor_agent_id)}\n"
-                        f"Write exactly one short note to `{note_path}` before the round deadline at {deadline_at}.\n"
-                        f"Do not create alternate artifacts or extra tasks.\n"
-                        f"When done, mark this issue done."
+                    "description": contributor_prompt(
+                        parent_identifier=parent_issue.get("identifier") or parent_issue["id"],
+                        plan_path=contract["planPath"],
+                        current_champion=current_champion,
+                        note_path=str(note_path),
+                        deadline_at=deadline_at,
+                        role_instruction=contributor_role_text(contributor_agent_id),
                     ),
                     "status": "todo",
                     "priority": parent_issue.get("priority") or "high",
@@ -869,30 +984,34 @@ def spawn_round(parent_issue: dict, contract: dict) -> tuple[dict, dict, list[di
             contributor_issue_identifiers.append(contributor_issue.get("identifier"))
             contributor_lines.append(f"- {contributor_name}: `{note_path}` ({contributor_issue.get('identifier')})")
 
-        description = (
-            f"This is the captain issue for one shared Autoresearch team round for parent {parent_issue.get('identifier') or parent_issue['id']}.\n\n"
-            f"Read the loop instructions in `{contract['programPath']}` and the current champion at `{current_champion}`.\n"
-            f"The round has a hard wall-clock deadline at {deadline_at} ({deadline_minutes} minutes).\n"
-            f"Contributor notes may arrive here:\n" + ("\n".join(contributor_lines) if contributor_lines else "- no contributor notes configured") + "\n\n"
-            f"As round captain, assemble exactly one candidate at `{candidate_path}` and one memo at `{memo_path}`.\n"
-            f"Append exactly one TSV row to `{contract['resultsPath']}` using the required columns.\n"
-            f"Use whatever contributor notes exist by the deadline; do not wait indefinitely.\n"
-            f"If the candidate should replace the current champion, log `keep`; otherwise log `discard`. Use `failed` if you could not produce a viable result.\n"
-            f"When you are done, mark this issue done."
+        description = captain_prompt(
+            parent_identifier=parent_issue.get("identifier") or parent_issue["id"],
+            plan_path=contract["planPath"],
+            plan_sha256=contract.get("planSha256"),
+            current_champion=current_champion,
+            candidate_path=str(candidate_path),
+            memo_path=str(memo_path),
+            result_path=str(result_path),
+            result_schema_path=contract.get("resultSchemaPath") or "docs/RESULT_SCHEMA.md",
+            results_tsv_path=contract["resultsPath"],
+            deadline_at=deadline_at,
+            deadline_minutes=deadline_minutes,
+            contributor_lines=contributor_lines,
         )
     else:
         captain_agent_id = parent_issue.get("assigneeAgentId")
         contributor_issue_ids = []
         contributor_issue_identifiers = []
-        description = (
-            f"Run one autoresearch generation for parent {parent_issue.get('identifier') or parent_issue['id']}.\n\n"
-            f"Read the loop instructions in `{contract['programPath']}`.\n"
-            f"Read the current champion at `{current_champion}`.\n"
-            f"Write exactly one candidate to `{candidate_path}`.\n"
-            f"Write a short round memo to `{memo_path}`.\n"
-            f"Append exactly one TSV row to `{contract['resultsPath']}` using the required columns.\n"
-            f"If the candidate should replace the current champion, log `keep`; otherwise log `discard`. Use `failed` if you could not produce a viable result.\n"
-            f"When you are done, mark this round issue done."
+        description = solo_round_prompt(
+            parent_identifier=parent_issue.get("identifier") or parent_issue["id"],
+            plan_path=contract["planPath"],
+            plan_sha256=contract.get("planSha256"),
+            current_champion=current_champion,
+            candidate_path=str(candidate_path),
+            memo_path=str(memo_path),
+            result_path=str(result_path),
+            result_schema_path=contract.get("resultSchemaPath") or "docs/RESULT_SCHEMA.md",
+            results_tsv_path=contract["resultsPath"],
         )
     child_issue = create_issue(
         {
@@ -992,6 +1111,21 @@ def process_parent_issue(parent_issue: dict, all_issues: list[dict], live_runs: 
             patch_parent_issue(parent_issue, contract)
         summary["status"] = contract["status"]
         summary["note"] = contract.get("stopReason")
+        return summary
+
+    if contract.get("status") in {"draft", "running", "paused"} and contract.get("planValidationErrors"):
+        validation = validate_plan_file(contract["planPath"])
+        reason = f"Plan validation failed: {plan_validation_summary(validation)}"
+        contract, paused = pause_local_contract(
+            contract,
+            children_by_id,
+            live_runs_by_issue,
+            reason,
+        )
+        if paused or changed:
+            patch_parent_issue(parent_issue, contract)
+        summary["status"] = contract["status"]
+        summary["note"] = reason
         return summary
 
     contract, deadline_adjusted = maybe_trigger_team_round_deadline(parent_issue, contract, children_by_id, live_runs_by_issue)

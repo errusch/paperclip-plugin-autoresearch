@@ -42,7 +42,7 @@ function statusLabel(status: string) {
 }
 
 function sourceModeLabel(mode: "actual_upstream" | "m_series_local") {
-  return mode === "actual_upstream" ? "Actual Upstream (CUDA)" : "M-series Local";
+  return mode === "actual_upstream" ? "Remote GPU (CUDA)" : "Apple Silicon (Local)";
 }
 
 function sourceModeTone(mode: "actual_upstream" | "m_series_local") {
@@ -129,6 +129,13 @@ function contractBudgetLabel(experiment: Experiment) {
 
 type Experiment = DashboardSummary["autoresearch"]["experiments"][number];
 type Generation = Experiment["generations"][number];
+type PlanAwareExperiment = Experiment & {
+  planPath?: string | null;
+  planValidatedAt?: string | null;
+  planValidationErrors?: string[];
+  scoreRubricPath?: string | null;
+  resultSchemaPath?: string | null;
+};
 
 /* ── Generation row (keep/discard history) ──────────────────────── */
 
@@ -179,6 +186,12 @@ function GenerationRow({ gen }: { gen: Generation }) {
 /* ── Single experiment lane ─────────────────────────────────────── */
 
 function ExperimentLane({ experiment }: { experiment: Experiment }) {
+  const planAware = experiment as PlanAwareExperiment;
+  const planPath = planAware.planPath ?? experiment.programPath ?? null;
+  const planValidatedAt = planAware.planValidatedAt ?? null;
+  const planValidationErrors = planAware.planValidationErrors ?? [];
+  const scoreRubricPath = planAware.scoreRubricPath ?? "docs/SCORING_RUBRIC.md";
+  const resultSchemaPath = planAware.resultSchemaPath ?? "docs/RESULT_SCHEMA.md";
   const [expanded, setExpanded] = useState(true);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const recentGens = experiment.generations.slice(-8);
@@ -280,10 +293,24 @@ function ExperimentLane({ experiment }: { experiment: Experiment }) {
               {pathTail(experiment.artifactPath) ?? experiment.artifactLabel}
             </span>
           </div>
+          {planPath && (
+            <div className="flex items-center gap-2">
+              <FileText className="h-3.5 w-3.5 text-muted-foreground/70 shrink-0" />
+              <span className="text-muted-foreground">Plan:</span>
+              <span className="truncate font-medium" title={planPath}>
+                {pathTail(planPath)}
+              </span>
+              {planValidatedAt ? (
+                <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500 shrink-0" />
+              ) : (
+                <AlertTriangle className="h-3.5 w-3.5 text-amber-500 shrink-0" />
+              )}
+            </div>
+          )}
           {experiment.programPath && (
             <div className="flex items-center gap-2">
               <FileText className="h-3.5 w-3.5 text-muted-foreground/70 shrink-0" />
-              <span className="text-muted-foreground">Program:</span>
+              <span className="text-muted-foreground">Legacy alias:</span>
               <span className="truncate" title={experiment.programPath}>
                 {pathTail(experiment.programPath)}
               </span>
@@ -312,6 +339,20 @@ function ExperimentLane({ experiment }: { experiment: Experiment }) {
             <span className="text-muted-foreground">Rules:</span>
             <span className="truncate">
               {experiment.metricLabel ?? "score"} · higher score wins
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <FileText className="h-3.5 w-3.5 text-muted-foreground/70 shrink-0" />
+            <span className="text-muted-foreground">Rubric:</span>
+            <span className="truncate" title={scoreRubricPath}>
+              {pathTail(scoreRubricPath)}
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <FileText className="h-3.5 w-3.5 text-muted-foreground/70 shrink-0" />
+            <span className="text-muted-foreground">Result schema:</span>
+            <span className="truncate" title={resultSchemaPath}>
+              {pathTail(resultSchemaPath)}
             </span>
           </div>
           <div className="flex items-center gap-2">
@@ -502,6 +543,24 @@ function ExperimentLane({ experiment }: { experiment: Experiment }) {
               {experiment.currentPreview}
             </p>
           )}
+          {planValidationErrors.length > 0 && (
+            <div className="mt-3 flex items-start gap-2 rounded-md border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <div>
+                <div className="font-medium">Plan validation warning</div>
+                <div>{planValidationErrors.join(" · ")}</div>
+              </div>
+            </div>
+          )}
+          <div className="mt-3 rounded-md border border-border/70 bg-muted/10 px-3 py-2 text-xs text-muted-foreground">
+            <div className="font-medium text-foreground">Scoring rubric</div>
+            <div className="mt-1">
+              Artifact quality 40% · Plan adherence 25% · Verification quality 20% · Operator trust 15%
+            </div>
+            <div className="mt-1">
+              Every round should also emit one structured result JSON with summary, outputs, verification, blockers, and next actions.
+            </div>
+          </div>
         </div>
         {experiment.winnerSummary && (
           <div>
@@ -641,7 +700,7 @@ interface AutoresearchPanelProps {
 export function AutoresearchOverviewCard({
   autoresearch,
   title = "Autoresearch",
-  subtitle = "Team-round optimization lanes — one mutable artifact, fixed-budget iterations, keep/discard ratchet.",
+  subtitle = "Plan-first improvement lanes with fixed-budget rounds, visible winners, and compaction-safe execution.",
 }: AutoresearchPanelProps) {
   return (
     <div className="rounded-lg border border-border overflow-hidden">
