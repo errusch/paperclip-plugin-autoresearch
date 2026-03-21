@@ -160,8 +160,11 @@ def normalize_contract(issue: dict) -> dict | None:
     if not isinstance(contract, dict) or contract.get("kind") != "autoresearch":
         return None
     experiment_dir = Path(contract.get("experimentDir") or default_experiment_dir(issue))
+    workspace_root = Path(contract.get("workspaceRoot") or contract.get("repoRoot") or Path.cwd())
     explicit_plan_path = contract.get("planPath") or contract.get("programPath")
-    plan_path = Path(explicit_plan_path or experiment_dir / "program.md")
+    plan_path = Path(explicit_plan_path) if explicit_plan_path else (experiment_dir / "program.md")
+    if explicit_plan_path and not plan_path.is_absolute():
+        plan_path = workspace_root / plan_path
     results_path = Path(contract.get("resultsPath") or experiment_dir / "results.tsv")
     current_path = contract.get("currentPath") or contract.get("winnerPath") or contract.get("artifactPath")
     generations = [normalize_generation(item) for item in contract.get("generations", []) if isinstance(item, dict)]
@@ -186,6 +189,7 @@ def normalize_contract(issue: dict) -> dict | None:
         "planPath": str(plan_path),
         "programPath": str(plan_path),
         "autoGeneratePlan": explicit_plan_path is None,
+        "workspaceRoot": str(workspace_root),
         "resultsPath": str(results_path),
         "experimentDir": str(experiment_dir),
         "planValidatedAt": contract.get("planValidatedAt"),
@@ -382,13 +386,13 @@ def ensure_experiment_files(issue: dict, contract: dict) -> tuple[dict, bool]:
     if contract.get("localStrategy") == "team_round" and not contract.get("roundCaptainAgentId"):
         contract["roundCaptainAgentId"] = issue.get("assigneeAgentId")
         changed = True
-    if contract.get("status") == "draft":
+    if not validation.errors and contract.get("status") == "draft":
         contract["status"] = "running"
         changed = True
-    if not contract.get("loopStartedAt"):
+    if not validation.errors and not contract.get("loopStartedAt"):
         contract["loopStartedAt"] = isoformat(now_utc())
         changed = True
-    if contract.get("status") == "running" and not contract.get("lastRestartedAt"):
+    if not validation.errors and contract.get("status") == "running" and not contract.get("lastRestartedAt"):
         contract["lastRestartedAt"] = contract["loopStartedAt"]
         contract["lastRestartReason"] = "initial start"
         changed = True
