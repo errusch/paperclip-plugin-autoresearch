@@ -161,8 +161,9 @@ def normalize_contract(issue: dict) -> dict | None:
         return None
     experiment_dir = Path(contract.get("experimentDir") or default_experiment_dir(issue))
     workspace_root = Path(contract.get("workspaceRoot") or contract.get("repoRoot") or Path.cwd())
-    explicit_plan_path = contract.get("planPath") or contract.get("programPath")
-    plan_path = Path(explicit_plan_path) if explicit_plan_path else (experiment_dir / "program.md")
+    explicit_plan_path = contract.get("planPath")
+    legacy_program_path = contract.get("programPath")
+    plan_path = Path(explicit_plan_path or legacy_program_path or experiment_dir / "program.md")
     if explicit_plan_path and not plan_path.is_absolute():
         plan_path = workspace_root / plan_path
     results_path = Path(contract.get("resultsPath") or experiment_dir / "results.tsv")
